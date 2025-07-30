@@ -1,0 +1,1010 @@
+---
+title: "How to verify that a given process is Lévy-Driven Ornstein-Uhlenbeck processes"
+author: "Ibrahim Abdelrazeq, Hardy Smith, and Dinmukhammed Zhanbyrshy"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+bibliography: References-3.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(fBasics) 
+library(lmtest) 
+library(MASSExtra)
+library(rootSolve)
+library(dplyr) 
+library(readr) 
+library(readxl) 
+library(tidyverse)
+library(texreg) 
+library(xts) 
+library(zoo) 
+library(PerformanceAnalytics) 
+library(QRM) 
+library(quantmod)
+library(ggplot2)
+library(sandwich) 
+library(timeSeries) 
+library(TTR)
+library(parallel)
+```
+
+# Introduction
+
+In our methodological paper, we detail how to verify that a given process is a Lévy-driven Ornstein-Uhlenbeck processes. This document features R code and other supplementary material in order to apply our verification process.
+
+
+# 1 Common Functions
+
+The following are common functions to be applied to varying simulated Lévy-processes ,i.e., Brownian Motion, Gamma, Beta, Inverse Gaussian, and mixed combinations of these.
+
+## 1.1 Driving Process
+
+This function approximates the driving process.
+
+\hfill
+
+It takes in the inputs
+
+- $N$: The number of time intervals observed, $[0, N]$
+- $K$: The number of small increments in the observed interval, $N$. With a large $K$, we consider the process to be continuously observed
+- $\mu$: The mean of the noise or randomness
+- Noise: Randomness in the driving process (in a vector)
+
+and outputs the simulated driving process. It requires that the input Noise must be of length $N(K)+1$.
+
+```{r}
+Driving_Process_BM<-function(N,K,mu,noise)
+{
+  Dt <- 1/K;
+  La <- numeric(N*K+2000+1);
+  for(i in 2:(N*K+2000+1)){
+    La[1]<- 0;
+    La[i] <- La[i-1] + noise[i];
+  }
+  out<-La[(2000+1): (N*K+1+2000)];
+}
+```
+
+## 1.2 CAR(1) or Y
+
+This function simulates the movement of $Y$, the thing being modeled over time (Spread, Realized Volatility, etc.), using the Euler approximation. It takes into account $Y$'s tendency to return to a mean value ($a$) and randomness (noise).
+
+\hfill
+
+It takes in the inputs
+
+- $a$: Mean reversion rate
+- $\mu$: Mean of the noise
+- $\sigma$: Volatility parameter
+- $N$: The number of big intervals
+- $K$: The number of small increments in the observed interval, $N$. With a large $K$, we consider the process to be continuously observed
+- Noise: Randomness in the driving process (in vector form)
+- $Y_0$: Starting point of Y
+
+and initializes an array for $Y$ starting at $Y_0$, updates the array using the Euler approximation with frequency $K$, then outputs the CAR(1) process. Noise $Z$ and the starting point $Y_0$ must be simulated first (the same noise is used for Driving_Process_BM).
+
+```{r}
+CAR1<-function(a,mu,sigma,N,K,noise,Y0)
+{
+  Y <-numeric(N*K+1);
+  Y[1] <- Y0;
+  Dt=1/K;
+  for(i in 2:(N*K+1+2000)){
+    Y[i] <- Y[i-1]- a*Y[i-1]*Dt + sigma*noise[i];
+  }
+  out<-Y[2001:(N*K+1+2000)]
+}
+```
+
+## 1.3 Sampled Process
+
+This function samples the simulated CAR(1) process, observing it at discrete times. The sampled process observes fewer increments instead of all increments.
+
+\hfill
+
+It takes in the inputs
+
+- Data: Output from CAR1
+- $N$: The number of big intervals
+- $K$: The number of small increments in the observed interval, $N$. With a large $K$, we consider the process to be continuously observed
+- $M$: The sampling frequency
+
+and samples the CAR(1) process at a frequency $M$; then it outputs the sampled process.
+
+```{r}
+CAR1_Sampled<-function(data,N,K,M)
+{
+  Y=data;
+  Ymod<-Y[2:(N*K+1)];
+  relation<-K/M;
+  Indices=seq(from=1,to=N*K,by=relation);
+  Ymod_sampled=Ymod[Indices];
+  out<-Ymod_sampled;
+}
+```
+
+## 1.4.1 Estimated $a$ LSB
+
+This subsection corresponds to Section 3.1 from the methodological paper. Here we introduce a function to estimate $a$ using the Least Squares Based estimator taken from [@Ibrahim]:
+
+\[
+\label{ahat}
+\widehat{{a}}_N^{(M)}= \frac{\sum_{n=1}^{NM} \left(Y_{\frac{n-1}{M}}-Y_{\frac{n}{M}}\right)\left(Y_{\frac{n-1}{M}}-\overline{Y}\right)}{\frac{1}{M}\sum_{n=1}^{NM} \left(Y_{\frac{n-1}{M}}-\overline{Y}\right)^2}~~\text{where}~~\overline{Y}=\frac{1}{NM}\sum_{n=1}^{NM}Y_\frac{n}{M}.
+\]
+
+This function calculates the estimated $a$, the strength of $Y$'s tendency to return to a mean value.
+
+\hfill
+
+It takes in the inputs
+
+- Data: Output from CAR1_Sampled
+- $N$: The number of big intervals
+- $M$: The sampling frequency
+- $\sigma$: Volatility parameter
+- $Y_0$: Initial value (starting point)
+
+and it outputs the estimated $a$.
+
+```{r}
+Estimated_MLE<-function(data,N,M, sigma, Y0)
+{
+  Delta_1L<- numeric(N);
+  S_nM<- numeric(N);
+  S_nMean<- numeric(N)
+  S_nM[1]=sum(data[1:M]);
+  for(n in 2:N) {
+    i=(n-1)*M+1; up=n*M;
+    S_nM[n] <- sum(data[floor(i):floor(up)])
+  }
+  S_nMean<- S_nM-mean(S_nM);
+  phi_1<- (sum(S_nMean[1:N-1]*S_nMean[2:N]))/(sum(S_nMean^2));
+  data=data-mean(data)
+  R=length(data)
+  phi_Y= (sum(data[1:R-1]*data[2:R]))/(sum(data^2))
+  a_hat=-M*phi_Y+M;
+  out<- a_hat;
+}
+```
+
+## 1.4.2 Estimated $a$ DMB
+
+This subsection also corresponds to Section 3.1 from the methodological paper. Here we introduce a function to estimate $a$ using the incredibly accurate DMB estimator t Least Squares Based estimator that we observe from [@Brockwelletall2007] and [@DavisMcCormick]:
+
+\[
+\widehat{a}_N^{(M)} = \sup_{0 \leq n < [NM]} \frac{\log(Y_{\frac{n}{M}}) - \log(Y_{\frac{n + 1}{M}})}{\frac{1}{M}}
+\]
+
+\hfill
+
+It takes in the inputs
+
+- Data: Output from CAR1_Sampled
+- $N$: The number of big intervals
+- $M$: The sampling frequency
+
+and it outputs the alternate estimated $a$.
+
+```{r}
+Estimated_Log<-function(data, N, M){
+  R = length(data);
+  diff=log(data[1:R-1])-log(data[2:R]);
+  a_hat=M*(max(diff));
+  out<- a_hat;
+}
+```
+
+## 1.5 Recovered Increments
+
+This subsection corresponds to Section 3.3 of the methodological paper. This function calculates the movement within increments of the recovered process over interval of length 1. It does this by calculating how the observed process changes over discrete intervals and adjusting these changes based on the fixed mean reversion parameter $a$ (the tendency to return to a mean value). 
+
+\hfill
+
+It takes in the inputs
+
+- Data: Output from CAR1_Sampled
+- $N$: The number of big intervals
+- $a$: The mean reversion parameter
+- $M$: The sampling frequency
+- $\sigma$: Volatility parameter
+
+and it outputs a vector of the recovered increments that tells us how much the simulated process moved between increments, factoring in the fixed mean reversion parameter.
+
+```{r}
+Recovered_Increments<-function(data,N,a,M,sigma)
+{
+  Delta_1L<- numeric(N);
+  Delta_1L[1]<-(a/(M*sigma))*sum(data[1:M])+(1/sigma-a/(2*M*sigma))*(data[M]-data[1]);
+  for(n in 2:N) {
+    i=(n-1)*M+1; up=n*M;
+    Delta_1L[n] <-
+      (a/(M*sigma))*sum(data[floor(i):floor(up)])+(1/sigma-a/(2*M*sigma))*(data[up]-data[i-1])
+  }
+  out<-Delta_1L;
+}
+```
+
+## 1.7 Recovered Increments with Estimated $a$
+
+This subsection also corresponds to section 3.3 of the methodological paper. The following function does the same thing as the Recovered_Increments function, but uses an estimated mean reversion parameter $a$, as described in sections 1.4.1 and 1.4.2.
+
+\hfill
+
+Taken from [@Ibrahim], we define the recovered increments using an estimator of $a$:
+
+\[
+\widehat{\Delta_1 \widehat{L}^{(M)}_{n}} \equiv \frac{\widehat{a}^{(M)}_N}{M} \sum_{i=(n-1)M+1}^{nM} Y_{\frac{i}{M}} + \left(1 - \frac{\widehat{a}^{(M)}_N}{2M}\right) \left(Y_n - Y_{n-1}\right)
+\]
+
+```{r}
+Recovered_Increments_with_estimated_a<-function(data,N,M,sigma,Y0)
+{
+  Delta_1L<- numeric(N);
+  phi_hat=c();
+  S_nM<- numeric(N);
+  S_nM_sq<- numeric(N);
+  for(n in 1:N) {
+    i=(n-1)*M+1; up=n*M;
+    S_nM[n] <- (1/M)*sum(data[floor(i):floor(up)])
+  }
+  phi_hat=acf(S_nM);
+  a=-1*log(abs(phi_hat$acf[2]));
+  Delta_1L[1]<- (a/(M*sigma))*sum(data[1:M])+(1/sigma-a/(2*M*sigma))*(data[M]-Y0);
+  for(n in 2:N) {
+    i=(n-1)*M+1; up=n*M;
+    Delta_1L[n] <-
+      (a/(M*sigma))*sum(data[floor(i):floor(up)])+(1/sigma-a/(2*M*sigma))*(data[up]-data[i-1]);
+  }
+  out<-Delta_1L;
+}
+```
+
+## 1.8 Test Statistic
+
+This subsection corresponds to Section 3.4 of the methodological paper. This function calculates the test statistic $W_{\widehat{\Delta_1\widehat{L}^{(M)}}}(1)$ as defined in
+
+\[
+W_{\widehat{\Delta_1\widehat{L}^{(M)}}}(1) \equiv\sqrt{N}~\frac{\widehat{\gamma_{\Delta_1\widehat{L}^{(M)}}}(1)}{\widehat{\eta}^2}
+\]
+
+```{r}
+test_statistic <- function(Delta_1L, N) {
+  a_1L <- acf(Delta_1L, plot = FALSE) 
+  test_stat <- sqrt(N) * a_1L$acf[2]
+  return(test_stat)
+}
+```
+
+# 2 Performance of the test for various backround processes 
+
+## 2.1.1 Brownian motion driven CAR(1) process
+
+### Variables and Indicators
+
+This defines the standard values for each variable and indicator in the Brownian Motion simulation.
+
+```{r}
+N=100;K=5000;M=100;mu=1;a=0.9;sigma=1;eta=1
+```
+
+```{r bm, include=FALSE}
+CARMA_MCBM<-function(R=10,N=100,K=5000,M=100,mu=1,a=0.9,eta=1,sigma=1,alpha=0.05)
+{
+  quantile=qnorm(1-alpha/2);
+  counter_2=0
+  a_hatMLE=c();
+  for(i in 1:R)
+  {
+    Z <- rnorm(N*K+2000+1,mu*(1/K),eta*(1/sqrt(K)));
+    Y0 <- rnorm(1,mean=mu*sigma/a, sd=sigma*eta/sqrt(2*a));
+    L=Driving_Process_BM(N=N,K=K,mu=mu,noise=Z);
+    Y<-CAR1(a=a,mu=mu,sigma=sigma,N=N,K=K,noise=Z,Y0=Y0);
+    Y_sampled<-CAR1_Sampled(data=Y,N=N,K=K,M=M);
+    a_h=Estimated_MLE( Y_sampled, N=N, M=M, sigma=sigma, Y0=Y0);
+    Delta_1L<-Recovered_Increments(Y_sampled, N, M,a=a_h , sigma);
+    a_1L=acf(Delta_1L, plot = FALSE);
+    if(abs(sqrt(N)*a_1L$acf[2])>quantile){counter_2=counter_2+1};
+    a_hatMLE[i]=a_h;
+  }
+  freq_2=counter_2/R;
+  print(freq_2);
+}
+```
+
+### Rejection Rate Returned
+
+This function returns the calculated rejection rate for a number of iterations, defined by the input R.
+
+```{r}
+CARMA_MCBM(R=400,N=100,K=5000,M=100,mu=1,a=0.9,eta=1,sigma=1,alpha=0.05)
+```
+
+### Driving Process Plot
+
+```{r}
+Z <- rnorm(N*K+2000+1,mu*(1/K),eta*(1/sqrt(K)));
+Y0 <- rnorm(1,mean=mu*sigma/a, sd=sigma*eta/sqrt(2*a));
+L=Driving_Process_BM(N=N,K=K,mu=mu,noise=Z);
+Y<-CAR1(a=a,mu=mu,sigma=sigma,N=N,K=K,noise=Z,Y0=Y0);
+Y_sampled<-CAR1_Sampled(data=Y,N=N,K=K,M=M);
+Delta_1L<-Recovered_Increments(Y_sampled,N, a, M, sigma);
+Time_Scale=seq(0,N,by=1/K);
+par(mfrow=c(1,1));
+plot(Time_Scale,L,type="l",main="Driving Process")
+```
+
+### CAR and Sampled CAR Plots
+
+```{r}
+plot(Time_Scale,Y,type="l",main="CAR")
+Indices=seq(1/M,N,by=1/M)
+plot(Indices, Y_sampled,type="l",main="Sampled CAR")
+```
+
+### Recovered Increments (Delta_1L) Plot
+
+```{r}
+plot.ts(Delta_1L,main="Recovered Increments")
+```
+
+### Recovered Increments ACF Plot
+
+```{r}
+acf(Delta_1L,main="Recovered")
+```
+
+## 2.1.2 Gamma driven CAR(1) process
+
+### Variables and Indicators
+
+This defines the standard values for each variable and indicator in the Gamma simulation.
+
+```{r}
+N=100; K=5000; M=100; mu=1; a=0.9;sigma=1; eta=1
+```
+
+```{r gamma, include=FALSE}
+CARMA_MCG<-function(R=10,N=100,K=5000,M=100,mu=1,a=0.9,eta=1,sigma=1,alpha=0.05)
+{
+  quantile=qnorm(1-alpha/2);
+  counter_2=0;
+  a_hatMLE=c();
+  a_hatLog=c();
+  for(i in 1:R)
+  {
+    alpha = mu^2/eta^2; beta = eta^2/mu;
+    Y0 <- rgamma(1, alpha,scale=1/beta);
+    Z <- rgamma(N*K+2000+1,alpha*1/K,scale=1/beta);
+    L=Driving_Process_BM(N=N,K=K,mu=mu,noise=Z);
+    Y<-CAR1(a=a,mu=mu,sigma=sigma,N=N,K=K,noise=Z,Y0=Y0);
+    Y_sampled<-CAR1_Sampled(data=Y,N=N,K=K,M=M);
+    a_h=Estimated_MLE( Y_sampled, N=N, M=M, sigma=sigma, Y0=Y0);
+    a_hNew=Estimated_Log(Y_sampled, N=N, M=M);
+    Delta_1L<-Recovered_Increments(Y_sampled, N, a_hNew, M, sigma);
+    a_1L=acf(Delta_1L, plot = FALSE);
+    if(abs(sqrt(N)*a_1L$acf[2])>quantile){counter_2=counter_2+1};
+    a_hatMLE[i]=a_h;
+    a_hatLog[i]=Estimated_Log(Y_sampled, N=N, M=M)
+  }
+  freq_2=counter_2/R;
+  print(freq_2);
+}
+```
+
+### Rejection Rate Returned
+
+```{r}
+CARMA_MCG(R=400,N=100,K=5000,M=100,mu=1,a=0.9,eta=1,sigma=1,alpha=0.05)
+```
+
+### Driving Process Plot
+
+```{r}
+alpha = mu^2/sigma^2; beta = sigma^2/mu;
+Y0 <- rgamma(1, alpha, scale=1/beta);
+Z <- rgamma(N*K+2000+1,alpha*1/K,scale=1/beta);
+L=Driving_Process_BM(N=N,K=K,mu=mu,noise=Z);
+Y<-CAR1(a=a,mu=mu,sigma=sigma,N=N,K=K,noise=Z,Y0=Y0);
+Y_sampled<-CAR1_Sampled(data=Y,N=N,K=K,M=M);
+Delta_1L<-Recovered_Increments(Y_sampled,N, a, M, sigma);
+Indices=seq(1/M,N,by=1/M);
+Time_Scale=seq(0,N,by=1/K);
+par(mfrow=c(1,1));
+plot(Time_Scale,L,type="l",main="Driving Process")
+```
+
+### CAR and Sampled CAR Plots
+
+```{r}
+plot(Time_Scale,Y,type="l",main="CAR");
+plot(Indices, Y_sampled,type="l",main="Sampled CAR")
+```
+
+### Recovered Increments (Delta_1L) Plot
+
+```{r}
+plot.ts(Delta_1L,main="Recovered Increments")
+```
+
+### Recovered Increments ACF PLot
+
+```{r}
+acf(Delta_1L,main="Recovered")
+```
+
+## 2.1.3 Inverse Gaussian driven CAR(1) process
+
+### Variables and Indicators
+
+This defines the standard values for each variable and indicator in the Inverse Gaussian simulation.
+
+```{r}
+N=100; K=5000; M=100; mu=1; a=0.9;sigma=1; eta=1
+```
+
+```{r IG, include=FALSE}
+library(statmod); #requires statmod package
+
+CARMA_MCIG<-function(R=10,N=100,K=5000,M=100,mu=1,a=0.9,eta=1,sigma=1,alpha=0.05)
+{
+  quantile=qnorm(1-alpha/2);
+  counter_2=0;
+  a_hatMLE=c();
+  a_hatLog=c();
+  for(i in 1:R)
+  {
+    Y0 <- rinvgauss(1, mean = mu, shape = mu^3 * eta^2);
+    Z <- rinvgauss(N * K + 2000 + 1, mean = mu/K, shape = (mu^3 * eta^2) *1/K^2);
+    L=Driving_Process_BM(N=N,K=K,mu=mu,noise=Z);
+    Y<-CAR1(a=a,mu=mu,sigma=sigma,N=N,K=K,noise=Z,Y0=Y0);
+    Y_sampled<-CAR1_Sampled(data=Y,N=N,K=K,M=M);
+    a_h=Estimated_MLE( Y_sampled, N=N, M=M, sigma=sigma, Y0=Y0);
+    a_hNew=Estimated_Log(Y_sampled, N=N, M=M);
+    Delta_1L<-Recovered_Increments(Y_sampled, N, a=a_hNew, M, sigma);
+    par(mfrow=c(1,2));
+    a_1L=acf(Delta_1L, plot = FALSE);
+    if(abs(sqrt(N)*a_1L$acf[2])>quantile){counter_2=counter_2+1};
+    a_hatMLE[i]=a_h;
+    a_hatLog[i]=Estimated_Log(Y_sampled, N=N, M=M)
+  }
+  freq_2=counter_2/R;
+  print(freq_2);
+}
+```
+
+### Rejection Rate Returned
+
+```{r}
+CARMA_MCIG(R=400,N=100,K=5000,M=100,mu=1,a=0.9,eta=1,sigma=1,alpha=0.05)
+```
+
+### Driving Process Plot
+
+```{r}
+Y0 <- rinvgauss(1, mean = mu, shape = mu^3 * eta^2);
+Z <- rinvgauss(N * K + 2000 + 1, mean = mu, shape = (mu^3 * eta^2) *1/K);
+L=Driving_Process_BM(N=N,K=K,mu=mu,noise=Z);
+Y<-CAR1(a=a,mu=mu,sigma=sigma,N=N,K=K,noise=Z,Y0=Y0);
+Y_sampled<-CAR1_Sampled(data=Y,N=N,K=K,M=M);
+Delta_1L<-Recovered_Increments(Y_sampled,N, a, M, sigma);
+Indices=seq(1/M,N,by=1/M);
+Time_Scale=seq(0,N,by=1/K)
+par(mfrow=c(1,1));
+plot(Time_Scale,L,type="l",main="Driving Process")
+```
+
+### CAR and Sampled CAR Plots
+
+```{r}
+plot(Time_Scale,Y,type="l",main="CAR");
+plot(Indices, Y_sampled,type="l",main="Sampled CAR")
+```
+
+### Recovered Increments (Delta_1L) Plot
+
+```{r}
+plot.ts(Delta_1L,main="Recovered Increments")
+```
+
+### Recovered Increments ACF PLot
+
+```{r}
+acf(Delta_1L,main="Recovered")
+```
+
+## 2.1.4 Mixed Inverse Gaussian and Gamma driven CAR(1) process
+
+### Variables and Indicators
+
+This defines the standard values for each variable and indicator in the mixed Inverse Gaussian and Gamma simulation.
+
+```{r}
+N=100; K=5000; M=100; mu=1; a=0.9;sigma=1; eta=1
+```
+
+### Generating Noise
+
+```{r}
+library(statmod); #requires statmod package
+
+Generate_noise<-function(N, K, mu, eta, lambda, alpha, beta){
+  
+  total_length <- N*K+2000+1;
+  noise <- numeric(total_length);
+  
+  for(i in 1:total_length){
+    if(runif(1) <= 1/8){
+      noise[i] <- rinvgauss(1, mean = mu/K, shape =  (mu^3/eta^2)*1/K^2);
+    }
+    else {
+      noise[i] <- rgamma(1,alpha*1/K,scale=1/beta);
+    }
+  }
+  
+  return(noise);
+}
+```
+
+```{r IGG, include=FALSE}
+CARMA_MCIGG<-function(R=10,N=100,K=5000,M=100,mu=1,a=0.9,lambda=1, eta=1,sigma=1,alpha=0.05)
+{
+  quantile=qnorm(1-alpha/2);
+  counter_1=0;
+  counter_2=0;
+  a_hatNew=c();
+  for(i in 1:R)
+  {
+    alpha = mu^2/eta^2; beta = eta^2/mu;
+    Y0 <- rinvgauss(1, mean = mu, shape = (mu^3/eta^2));
+    Z <- Generate_noise(N, K, mu, eta, lambda, alpha, beta);
+    L=Driving_Process_BM(N=N,K=K,mu=mu,noise=Z);
+    Y<-CAR1(a=a,mu=mu,sigma=sigma,N=N,K=K,noise=Z,Y0=Y0);
+    Y_sampled<-CAR1_Sampled(data=Y,N=N,K=K,M=M);
+    a_hNew=Estimated_Log(Y_sampled, N=N, M=M);
+    Delta_1L<-Recovered_Increments(Y_sampled, N, a_hNew, M, sigma);
+    par(mfrow=c(1,2));
+    a_1L=acf(Delta_1L, plot = FALSE);
+    if(abs(sqrt(N)*a_1L$acf[2])>quantile){counter_2=counter_2+1};
+    a_hatNew[i]=a_hNew;
+  }
+  freq_2=counter_2/R;
+  print(freq_2)
+}
+```
+
+### Rejection Rate Returned
+
+```{r}
+CARMA_MCIGG(R=400,N=100,K=5000,M=100,mu=1,a=0.9,lambda=1, eta=1,sigma=1,alpha=0.05)
+```
+
+### Driving Process Plot
+
+```{r}
+alpha = mu^2/eta^2; beta = eta^2/mu;
+Y0 <- rinvgauss(1, mean = mu, shape = (mu^3/eta^2));
+Z <- Generate_noise(N, K, mu, eta, lambda, alpha, beta);
+L=Driving_Process_BM(N=N,K=K,mu=mu,noise=Z);
+Y<-CAR1(a=a,mu=mu,sigma=sigma,N=N,K=K,noise=Z,Y0=Y0);
+Y_sampled<-CAR1_Sampled(data=Y,N=N,K=K,M=M);
+Delta_1L<-Recovered_Increments(Y_sampled,N, a, M, sigma);
+Indices=seq(1/M,N,by=1/M);
+Time_Scale=seq(0,N,by=1/K);
+par(mfrow=c(1,1));
+plot(Time_Scale,L,type="l",main="Driving Process")
+```
+
+### CAR and Sampled CAR Plots
+
+```{r}
+plot(Time_Scale,Y,type="l",main="CAR");
+plot(Indices, Y_sampled,type="l",main="Sampled CAR")
+```
+
+### Recovered Increments (Delta_1L) Plot
+
+```{r}
+plot.ts(Delta_1L,main="Recovered Increments")
+```
+
+### Recovered Increments ACF PLot
+
+```{r}
+acf(Delta_1L,main="Recovered")
+```
+
+# 2.2 Testing for the driving process
+
+This subsection correspond with Section 3.5 from the methodological paper.
+
+## 2.2.1 Procedure 1
+
+First we provide the function for Procedure 1, when we want to test if the driving process is BM or not.
+
+```{r}
+KS_test<-function(R=10,N=100,K=5000,M=100,mu=1,a=0.9,eta=1,sigma=1,alpha=0.05)
+        {
+        counter_2=0;
+        for(i in 1:R)
+                {
+                Z <- rnorm(N*K+1,mu*(1/K),eta*(1/sqrt(K)));
+                Y0 <- rnorm(1,mean=mu*sigma/a, sd=sigma*eta/sqrt(2*a));
+                L=Driving_Process_BM(N=N,K=K,mu=mu,noise=Z);
+                Y<-CAR1(a=a,mu=mu,sigma=sigma,N=N,K=K,noise=Z,Y0=Y0);
+                Y_sampled<-CAR1_Sampled(data=Y,N=N,K=K,M=M);
+                Delta_1L<-Recovered_Increments(Y_sampled, N, a, M, sigma);
+                Delta_1L_sample<- sample(Delta_1L, replace=T);
+                mu_hat=mean(Delta_1L_sample);
+                eta_hat_sqrt=mean((Delta_1L_sample-mu_hat)^2);
+                a_1L=ks.test(Delta_1L,"pnorm", mu_hat, sqrt(eta_hat_sqrt));
+                a_1L=a_1L$p.value;
+                if(a_1L<0.05){counter_2=counter_2+1};
+                }
+        freq_2=counter_2/R;
+        print(freq_2);
+}
+```
+
+```{r}
+KS_test(R=400,N=100,K=5000,M=100,mu=1,a=0.9,eta=1,sigma=1,alpha=0.05)
+```
+
+## 2.2.2 Procedure 2
+
+Here we provide the function for Procedure 2, when we want to test whether the driving process is a specific driving process other than Brownian motion, i.e., Gamma, Inverse Gaussian,
+or any other specified process.
+
+### Testing for Gamma
+
+```{r}
+brah=function(n, N, M, a){
+  K=5000; mu=1; eta=1; sigma=1;
+  a_alpha = mu^2/eta^2; beta = eta^2/mu;
+  Y0 <- rgamma(1, a_alpha,scale=1/beta);
+  Z <- rgamma(N*K+2000+1,a_alpha*1/K,scale=1/beta);
+  Y<-CAR1(a=a,mu=mu,sigma=sigma,N=N,K=K,noise=Z,Y0=Y0);
+  Y_sampled<-CAR1_Sampled(data=Y,N=N,K=K,M=M);
+  a_h=Estimated_Log(Y_sampled, N, M);
+  Delta_1L<-Recovered_Increments(Y_sampled, N, a_h, M, sigma);
+  
+  # Step 3
+  y=Delta_1L;
+  alpha_y=((mean(y))^2)/var(y);
+  beta_y=var(y)/mean(y);
+  Z_F_y=pgamma(y,alpha_y,1/beta_y);
+  # Step 4
+  Z_y=sort(Z_F_y);
+  # Step 5
+  D_y=c();
+  for (i in 1:n){
+    D_y[i]=max(i/n-Z_y[i],Z_y[i]-(i-1)/n)
+  }
+  STAT= sqrt(n)*max(D_y)
+  # Step 6
+  Bootdist=matrix(,nrow=1,ncol=1000)
+  for (i in 1:1000){
+    X_star=rgamma(n,alpha_y,1/beta_y);
+    alpha_star=((mean(X_star))^2)/var(X_star);
+    beta_star=var(X_star)/mean(X_star);
+    Z_star=pgamma(X_star,alpha_star,1/beta_star);
+    Z=sort(Z_star);
+    D=c();
+    for (j in 1:n){
+      D[j]=max(j/n-Z[j],Z[j]-(j-1)/n)
+    }
+    Bootdist[1,i]=sqrt(n)*max(D);
+  }
+  # Step 9
+  Average=0;
+  if (STAT>quantile(Bootdist[1,],.95)) {Average=1}
+  Average
+}
+
+cl<- makeCluster(detectCores())
+clusterSetRNGStream(cl)
+
+clusterExport(cl, c("CAR1", "CAR1_Sampled", "Estimated_Log", "Recovered_Increments", "Generate_noise"))
+
+TT1<-parSapply(cl,rep(100,400),brah, N=100, M=500, a=0.9)
+mean(TT1)
+
+stopCluster(cl)
+```
+
+### Testing for Inverse Gaussian
+
+```{r}
+brah=function(n, N, M, a){
+  K=5000; mu=1; eta=1; sigma=1;
+  Y0 <- rinvgauss(1, mean = mu, shape = (mu^3/eta^2));
+  Z <- rinvgauss(N*K+2000+1, mean = mu/K, shape = (mu^3/eta^2)*(1/K^2));
+  Y<-CAR1(a=a,mu=mu,sigma=sigma,N=N,K=K,noise=Z,Y0=Y0);
+  Y_sampled<-CAR1_Sampled(data=Y,N=N,K=K,M=M);
+  a_h=Estimated_Log(Y_sampled, N, M);
+  Delta_1L<-Recovered_Increments(Y_sampled, N, a_h, M, sigma);
+  
+  # Step 3 
+  y=Delta_1L;
+  mean_y=mean(y);
+  shape_y=(mean(y))^3/var(y);
+  Z_F_y=pinvgauss(y, mean=mean_y, shape=shape_y)
+  # Step 4 
+  Z_y=sort(Z_F_y);
+  # Step 5 
+  D_y=c();
+  for (i in 1:n){
+    D_y[i]=max(i/n-Z_y[i],Z_y[i]-(i-1)/n)
+  }
+  STAT= sqrt(n)*max(D_y)
+  # Step 6 
+  Bootdist=matrix(,nrow=1,ncol=1000)
+  for (i in 1:1000){
+    X_star=rinvgauss(n,mean = mean_y,shape = shape_y);
+    mean_star=mean(X_star);
+    shape_star=(mean(X_star))^3/var(X_star);
+    Z_star=pinvgauss(X_star,mean = mean_star,shape = shape_star);
+    Z=sort(Z_star);
+    D=c();
+    for (j in 1:n){
+      D[j]=max(j/n-Z[j],Z[j]-(j-1)/n)
+    }
+    Bootdist[1,i]=sqrt(n)*max(D);
+  }
+  # Step 9 
+  Average=0;
+  if (STAT>quantile(Bootdist[1,],.95)) {Average=1}
+  Average
+  }
+
+cl<- makeCluster(detectCores())
+clusterSetRNGStream(cl)
+
+clusterExport(cl, c("CAR1", "CAR1_Sampled", "Estimated_Log", "Recovered_Increments", "Generate_noise"))
+
+invisible(clusterEvalQ(cl, library(statmod)))
+
+TT1<-parSapply(cl,rep(100,400),brah, N=100, M=100, a=0.9)
+mean(TT1)
+
+stopCluster(cl)
+```
+
+# 3 Example with financial data
+
+This section corresponds with Section 4 of the methodological paper, our real-world example with S&P 500 stock data. We show how we calculate the spread dynamic, recover the increments with an estimated $a$ parameter, test whether a Lévy-driven CAR(1) model is a good fit for the spread dynamic, and test if the driving process of the spread is Brownian motion or not.
+
+```{r import, include=FALSE}
+import_data <- function(main_folder) {
+  column_names <- c("Date", "Time", "Open", "High", "Low", "Close", "Volume", "Split Factor", "Earnings", "Dividends")
+  
+  subfolders <- list.dirs(main_folder, recursive = FALSE)
+  
+  abt_data_list <- list()
+  dhr_data_list <- list()
+  
+  for (subfolder in subfolders) {
+    abt_file <- file.path(subfolder, "table_abt.csv")
+    dhr_file <- file.path(subfolder, "table_dhr.csv")
+    
+    if (file.exists(abt_file)) {
+      data <- read_csv(abt_file, col_names = column_names, show_col_types = FALSE)
+      abt_data_list[[length(abt_data_list) + 1]] <- data
+    }
+    
+    if (file.exists(dhr_file)) {
+      data <- read_csv(dhr_file, col_names = column_names, show_col_types = FALSE)
+      dhr_data_list[[length(dhr_data_list) + 1]] <- data
+    }
+  }
+  
+  abt_combined_data <- bind_rows(abt_data_list)
+  dhr_combined_data <- bind_rows(dhr_data_list)
+  
+  return(list(abt_data = abt_combined_data, dhr_data = dhr_combined_data))
+}
+
+main_folder <- "~/Desktop/Methodological/order_530780"
+
+data_sets <- import_data(main_folder)
+
+ABT <- data_sets$abt_data
+DHR <- data_sets$dhr_data
+
+print(head(ABT))
+print(head(DHR))
+```
+
+```{r clean, include=FALSE}
+ABT$Date <- as.character(ABT$Date)
+DHR$Date <- as.character(DHR$Date)
+
+ABT$Date <- as.Date(ABT$Date, format = "%Y%m%d")
+DHR$Date <- as.Date(DHR$Date, format = "%Y%m%d")
+
+abt_df <- data.frame(Date = ABT$Date, Time = ABT$Time, ABTClose = ABT$Close)
+dhr_df <- data.frame(Date = DHR$Date, Time = DHR$Time, DHRClose = DHR$Close)
+```
+
+```{r close, include=FALSE}
+ggplot(abt_df, aes(x = Date, y = ABTClose)) +
+  geom_line(color = "blue") +
+  labs(title = "ABT Close Prices", x = "Date", y = "Close Price") +
+  theme_minimal()
+
+ggplot(dhr_df, aes(x = Date, y = DHRClose)) +
+  geom_line(color = "green") +
+  labs(title = "DHR Close Prices", x = "Date", y = "Close Price") +
+  theme_minimal()
+```
+
+```{r merge, include=FALSE}
+merged_df <- merge(abt_df, dhr_df, by.x = c("Date", "Time"), by.y = c("Date", "Time"))
+
+head(merged_df)
+```
+
+### 3.1 Calculating spread dynamic of Apple and Google
+
+```{r}
+spread <- log(merged_df$ABTClose / as.numeric(merged_df$ABTClose[1])) - log(merged_df$DHRClose / as.numeric(merged_df$DHRClose[1]))
+
+spread_data <- data.frame(Date = merged_df$Date, Time = merged_df$Time, Spread = spread)
+```
+
+### 3.2 Spread dynamic plot
+
+```{r}
+ggplot(spread_data, aes(x = Date, y = Spread)) +
+  geom_line(color = "blue") +
+  labs(title = "Spread", x = "Date", y = "Spread") +
+  theme_minimal()
+```
+
+### 3.3 Estimating $a$ and recovering increments
+
+```{r}
+N <- nrow(spread_data)
+M <- 500
+sigma <- 1
+L <- spread_data$Spread
+a_h <- Estimated_MLE(L, N, M, sigma)
+recovered_increments <- Recovered_Increments(L, N, a=a_h, M, sigma)
+recovered_increments <- na.omit(recovered_increments)
+```
+
+### 3.4 Cleaning and plotting recovered increments
+
+```{r}
+recovered_increments <- data.frame(Index = 1:length(recovered_increments), Increment = recovered_increments)
+
+Delta_1L <- recovered_increments$Increment
+
+plot.ts(Delta_1L,main="Recovered Increments")
+plot(Delta_1L,main="Recovered Increments")
+```
+
+### 3.5 Testing increments
+
+```{r}
+CARMA_MC<-function(R,N,alpha)
+{
+  quantile=qnorm(1-alpha/2);
+  counter_1=0;
+  a_hatMLE=c();
+  for(i in 1:R)
+  {
+    a_1L=acf(Delta_1L, plot = FALSE);
+    if(abs(sqrt(N)*a_1L$acf[2])>quantile){counter_1=counter_1+1};
+    a_hatMLE[i]=a_h;
+  }
+  freq_1=counter_1/R;
+  print(c(freq_1));
+}
+```
+
+```{r}
+N <- nrow(recovered_increments)
+alpha <- 0.05
+CARMA_MC(R=1,N,alpha )
+```
+
+### 3.6 ACF plot
+
+```{r}
+acf(Delta_1L,main="Recovered")
+```
+
+### 3.7 Test statistic
+
+```{r}
+calculate_test_statistic <- function(Delta_1L, N) {
+  a_1L <- acf(Delta_1L, plot = FALSE) 
+  test_stat <- sqrt(N) * a_1L$acf[2]
+  return(test_stat)
+}
+calculate_test_statistic(Delta_1L, N)
+```
+
+### 3.8.1 Procedure 1
+
+```{r ks, include=FALSE}
+KS_test<-function(R=10,N=100,K=5000,M=100,mu=0,a=0.9,eta=1,sigma=1,alpha=0.05)
+        {
+        counter_2=0;
+        for(i in 1:R)
+                {
+                Delta_1L_sample<- sample(Delta_1L, replace=T);
+                mu_hat=mean(Delta_1L);
+                eta_hat_sqrt=mean((Delta_1L-mu_hat)^2);
+                a_1L=ks.test(Delta_1L,"pnorm", mu_hat, sqrt(eta_hat_sqrt));
+                a_1L=a_1L$p.value;
+                if(a_1L<0.05){counter_2=counter_2+1};
+                }
+        freq_2=counter_2/R;
+        print(freq_2);
+}
+```
+
+```{r}
+KS_test(R=1)
+```
+
+### 3.8.2 Procedure 2
+
+```{r}
+brah=function(N){
+  y=Delta_1L;
+  mu_y=mean(y);
+  eta_y=sd(y);
+  Z_F_y=pnorm(y, mean=mu_y, sd=eta_y);
+  # Step 4
+  Z_y=sort(Z_F_y);
+  # Step 5
+  D_y=c();
+  for (i in 1:N){
+    D_y[i]=max(i/N-Z_y[i],Z_y[i]-(i-1)/N)
+  }
+  STAT2= sqrt(N)*max(D_y)
+  # Step 6
+  Bootdist=matrix(,nrow=1,ncol=1000)
+  for (i in 1:1000){
+    X_star=rnorm(N,mu_y, eta_y);
+    mu_star=mean(X_star);
+    eta_star=sd(X_star);
+    Z_star=pnorm(X_star,mu_star, eta_star);
+    Z=sort(Z_star);
+    D=c();
+    for (j in 1:N){
+      D[j]=max(j/N-Z[j],Z[j]-(j-1)/N)
+    }
+    Bootdist[1,i]=sqrt(N)*max(D);
+  }
+  # Step 9
+  Average=0;
+  if (STAT2>quantile(Bootdist[1,],.95)) {Average=1}
+  Average
+}
+
+#if you want to run multiple tests, only run makeCluster once
+#then perform all your tests and close cluster
+cl<- makeCluster(detectCores())
+clusterSetRNGStream(cl)
+
+clusterExport(cl, varlist = c("Delta_1L"))
+
+#depending on N, change n: n=N
+TT1<-parSapply(cl,rep(N,1),brah)
+mean(TT1)
+
+stopCluster(cl)
+```
+
+## References
+
+
+
+
+
