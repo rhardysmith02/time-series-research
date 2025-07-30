@@ -1,0 +1,306 @@
+---
+title: "Calculate and Test"
+output: html_document
+date: "2024-07-22"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages, include=FALSE}
+# Dependence modelling 
+library(fBasics) 
+library(lmtest) 
+library(MASSExtra)
+library(rootSolve)
+library(dplyr) 
+library(readr) 
+library(readxl) 
+# Data handling 
+library(tidyverse)
+library(texreg) 
+#library(xlsx) 
+library(xts) 
+library(zoo) 
+library(PerformanceAnalytics) 
+library(QRM) 
+library(quantmod)
+# Financial modelling 
+library(ggplot2)
+library(sandwich) 
+library(timeSeries) 
+#library(tseries) 
+library(TTR)
+```
+
+Importing data from desktop
+
+```{r}
+import_data <- function(main_folder) {
+  column_names <- c("Date", "Time", "Open", "High", "Low", "Close", "Volume", "Split Factor", "Earnings", "Dividends")
+  
+  subfolders <- list.dirs(main_folder, recursive = FALSE)
+  
+  aapl_data_list <- list()
+  goog_data_list <- list()
+  
+  for (subfolder in subfolders) {
+    aapl_file <- file.path(subfolder, "table_aapl.csv")
+    goog_file <- file.path(subfolder, "table_goog.csv")
+    
+    if (file.exists(aapl_file)) {
+      data <- read_csv(aapl_file, col_names = column_names, show_col_types = FALSE)
+      aapl_data_list[[length(aapl_data_list) + 1]] <- data
+    }
+    
+    if (file.exists(goog_file)) {
+      data <- read_csv(goog_file, col_names = column_names, show_col_types = FALSE)
+      goog_data_list[[length(goog_data_list) + 1]] <- data
+    }
+  }
+  
+  aapl_combined_data <- bind_rows(aapl_data_list)
+  goog_combined_data <- bind_rows(goog_data_list)
+  
+  return(list(aapl_data = aapl_combined_data, goog_data = goog_combined_data))
+}
+
+main_folder <- "~/Desktop/Methodological/order_530780"
+
+data_sets <- import_data(main_folder)
+
+AAPL <- data_sets$aapl_data
+GOOG <- data_sets$goog_data
+
+print(head(AAPL))
+print(head(GOOG))
+```
+
+Cleaning data to only contain date, time, and close price
+
+```{r}
+AAPL$Date <- as.character(AAPL$Date)
+GOOG$Date <- as.character(GOOG$Date)
+
+AAPL$Date <- as.Date(AAPL$Date, format = "%Y%m%d")
+GOOG$Date <- as.Date(GOOG$Date, format = "%Y%m%d")
+
+aapl_df <- data.frame(Date = AAPL$Date, Time = AAPL$Time, AAPLClose = AAPL$Close)
+goog_df <- data.frame(Date = GOOG$Date, Time = GOOG$Time, GOOGClose = GOOG$Close)
+```
+
+Plotting individual stocks close prices
+
+```{r}
+ggplot(aapl_df, aes(x = Date, y = AAPLClose)) +
+  geom_line(color = "blue") +
+  labs(title = "AAPL Close Prices", x = "Date", y = "Close Price") +
+  theme_minimal()
+
+ggplot(goog_df, aes(x = Date, y = GOOGClose)) +
+  geom_line(color = "green") +
+  labs(title = "GOOG Close Prices", x = "Date", y = "Close Price") +
+  theme_minimal()
+```
+
+Merging both stocks with overlapping times
+
+```{r}
+merged_df <- merge(aapl_df, goog_df, by.x = c("Date", "Time"), by.y = c("Date", "Time"))
+
+head(merged_df)
+```
+
+Calculating spread dynamic
+
+```{r}
+spread <- log(merged_df$AAPLClose / as.numeric(merged_df$AAPLClose[1])) - log(merged_df$GOOGClose / as.numeric(merged_df$GOOGClose[1]))
+
+spread_data <- data.frame(Date = merged_df$Date, Time = merged_df$Time, Spread = spread)
+
+head(spread_data)
+
+```
+
+Plotting spread dynamic
+
+```{r}
+ggplot(spread_data, aes(x = Date, y = Spread)) +
+  geom_line(color = "blue") +
+  labs(title = "Spread", x = "Date", y = "Spread") +
+  theme_minimal()
+```
+
+```{r}
+Estimated_MLE<-function(data,N,M, sigma)
+{
+  Delta_1L<- numeric(N);
+  S_nM<- numeric(N);
+  S_nMean<- numeric(N)
+  S_nM[1]=sum(data[1:M]);
+  for(n in 2:N) {
+    i=(n-1)*M+1; up=n*M;
+    S_nM[n] <- sum(data[floor(i):floor(up)])
+  }
+  S_nMean<- S_nM-mean(S_nM);
+  phi_1<- (sum(S_nMean[1:N-1]*S_nMean[2:N]))/(sum(S_nMean^2));
+  data=data-mean(data)
+  R=length(data)
+  phi_Y= (sum(data[1:R-1]*data[2:R]))/(sum(data^2))
+  a_hat=-M*phi_Y+M;
+  out<- a_hat;
+}
+```
+
+```{r}
+Recovered_Increments<-function(data,N,a,M,sigma)
+{
+  Delta_1L<- numeric(N);
+  Delta_1L[1]<-(a/(M*sigma))*sum(data[1:M])+(1/sigma-a/(2*M*sigma))*(data[M]-data[1]);
+  for(n in 2:N) {
+    i=(n-1)*M+1; up=n*M;
+    Delta_1L[n] <-
+      (a/(M*sigma))*sum(data[floor(i):floor(up)])+(1/sigma-a/(2*M*sigma))*(data[up]-data[i-1])
+  }
+  out<-Delta_1L;
+}
+```
+
+Estimating a and recovering increments
+
+```{r}
+N <- nrow(spread_data)
+M <- 500
+sigma <- 1
+L <- spread_data$Spread
+a_h <- Estimated_MLE(L, N, M, sigma)
+recovered_increments <- Recovered_Increments(L, N, a=a_h, M, sigma)
+recovered_increments <- na.omit(recovered_increments)
+```
+
+Cleaning recovered increments
+
+```{r}
+recovered_increments <- data.frame(Index = 1:length(recovered_increments), Increment = recovered_increments)
+
+Delta_1L <- recovered_increments$Increment
+
+plot(Delta_1L,main="Recovered Increments")
+plot.ts(Delta_1L,main="Recovered Increments")
+```
+
+```{r}
+CARMA_MC<-function(R,N,alpha)
+{
+  quantile=qnorm(1-alpha/2);
+  counter_1=0;
+  a_hatMLE=c();
+  for(i in 1:R)
+  {
+    a_1L=acf(Delta_1L, plot = FALSE);
+    if(abs(sqrt(N)*a_1L$acf[2])>quantile){counter_1=counter_1+1};
+    a_hatMLE[i]=a_h;
+  }
+  freq_1=counter_1/R;
+  print(c(freq_1));
+  #print(a_hatMLE)
+  #print(a_1L)
+}
+```
+
+Testing
+
+```{r}
+N <- nrow(recovered_increments)
+alpha <- 0.05
+CARMA_MC(R=1,N,alpha )
+```
+
+ACF plot
+
+```{r}
+acf(Delta_1L,main="Recovered")
+```
+
+```{r}
+calculate_test_statistic <- function(Delta_1L, N) {
+  a_1L <- acf(Delta_1L, plot = FALSE) 
+  test_stat <- sqrt(N) * a_1L$acf[2]
+  return(test_stat)
+}
+calculate_test_statistic(Delta_1L, N)
+```
+
+```{r}
+KS_test<-function(R=10,N=100,K=5000,M=100,mu=0,a=0.9,eta=1,sigma=1,alpha=0.05)
+        {
+        counter_2=0;
+        for(i in 1:R)
+                {
+                Delta_1L_sample<- sample(Delta_1L, replace=T);
+                mu_hat=mean(Delta_1L);
+                eta_hat_sqrt=mean((Delta_1L-mu_hat)^2);
+                a_1L=ks.test(Delta_1L,"pnorm", mu_hat, sqrt(eta_hat_sqrt));
+                a_1L=a_1L$p.value;
+                if(a_1L<0.05){counter_2=counter_2+1};
+                }
+        freq_2=counter_2/R;
+        print(freq_2);
+        print(a_1L)
+}
+```
+
+```{r}
+KS_test(R=1)
+```
+
+Procedure 2
+
+```{r}
+brah=function(N){
+  y=Delta_1L;
+  mu_y=mean(y);
+  eta_y=sd(y);
+  Z_F_y=pnorm(y, mean=mu_y, sd=eta_y);
+  # Step 4
+  Z_y=sort(Z_F_y);
+  # Step 5
+  D_y=c();
+  for (i in 1:N){
+    D_y[i]=max(i/N-Z_y[i],Z_y[i]-(i-1)/N)
+  }
+  STAT2= sqrt(N)*max(D_y)
+  # Step 6
+  Bootdist=matrix(,nrow=1,ncol=1000)
+  for (i in 1:1000){
+    X_star=rnorm(N,mu_y, eta_y);
+    mu_star=mean(X_star);
+    eta_star=sd(X_star);
+    Z_star=pnorm(X_star,mu_star, eta_star);
+    Z=sort(Z_star);
+    D=c();
+    for (j in 1:N){
+      D[j]=max(j/N-Z[j],Z[j]-(j-1)/N)
+    }
+    Bootdist[1,i]=sqrt(N)*max(D);
+  }
+  # Step 9
+  Average=0;
+  if (STAT2>quantile(Bootdist[1,],.95)) {Average=1}
+  Average
+}
+
+#if you want to run multiple tests, only run makeCluster once
+#then perform all your tests and close cluster
+cl<- makeCluster(detectCores())
+clusterSetRNGStream(cl)
+
+clusterExport(cl, varlist = c("Delta_1L"))
+
+#depending on N, change n: n=N
+TT1<-parSapply(cl,rep(N,1),brah)
+mean(TT1)
+
+stopCluster(cl)
+```
