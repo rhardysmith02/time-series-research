@@ -1,0 +1,243 @@
+---
+title: "Untitled"
+output: html_document
+date: "2024-08-24"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages, include=FALSE}
+# Dependence modelling 
+library(fBasics) 
+library(lmtest) 
+library(MASSExtra)
+library(rootSolve)
+library(dplyr) 
+library(readr) 
+library(readxl) 
+# Data handling 
+library(tidyverse)
+library(texreg) 
+library(xts) 
+library(zoo) 
+library(PerformanceAnalytics) 
+library(QRM) 
+library(quantmod)
+# Financial modelling 
+library(ggplot2)
+library(sandwich) 
+library(timeSeries) 
+library(TTR)
+```
+
+```{r}
+import_data <- function(main_folder) {
+  column_names <- c("Date", "Time", "Open", "High", "Low", "Close", "Volume", "Split Factor", "Earnings", "Dividends")
+  
+  subfolders <- list.dirs(main_folder, recursive = FALSE)
+  
+  amgn_data_list <- list()
+  pfe_data_list <- list()
+  
+  for (subfolder in subfolders) {
+    amgn_file <- file.path(subfolder, "table_amgn.csv")
+    pfe_file <- file.path(subfolder, "table_pfe.csv")
+    
+    if (file.exists(amgn_file)) {
+      data <- read_csv(amgn_file, col_names = column_names, show_col_types = FALSE)
+      amgn_data_list[[length(amgn_data_list) + 1]] <- data
+    }
+    
+    if (file.exists(pfe_file)) {
+      data <- read_csv(pfe_file, col_names = column_names, show_col_types = FALSE)
+      pfe_data_list[[length(pfe_data_list) + 1]] <- data
+    }
+  }
+  
+  amgn_combined_data <- bind_rows(amgn_data_list)
+  pfe_combined_data <- bind_rows(pfe_data_list)
+  
+  return(list(amgn_data = amgn_combined_data, pfe_data = pfe_combined_data))
+}
+
+main_folder <- "~/Desktop/Methodological/order_530780"
+
+data_sets <- import_data(main_folder)
+
+AMGN <- data_sets$amgn_data
+PFE <- data_sets$pfe_data
+
+print(head(AMGN))
+print(head(PFE))
+```
+
+```{r}
+AMGN$Date <- as.character(AMGN$Date)
+PFE$Date <- as.character(PFE$Date)
+
+AMGN$Date <- as.Date(AMGN$Date, format = "%Y%m%d")
+PFE$Date <- as.Date(PFE$Date, format = "%Y%m%d")
+
+amgn_df <- data.frame(Date = AMGN$Date, Time = AMGN$Time, AMGNClose = AMGN$Close)
+pfe_df <- data.frame(Date = PFE$Date, Time = PFE$Time, PFEClose = PFE$Close)
+```
+
+```{r}
+ggplot(amgn_df, aes(x = Date, y = AMGNClose)) +
+  geom_line(color = "blue") +
+  labs(title = "Amgen (AMGN) Close Prices", x = "Date", y = "Close Price") +
+  theme_minimal()
+
+ggplot(pfe_df, aes(x = Date, y = PFEClose)) +
+  geom_line(color = "green") +
+  labs(title = "Pfizer (PFE) Close Prices", x = "Date", y = "Close Price") +
+  theme_minimal()
+```
+
+```{r}
+merged_df <- merge(amgn_df, pfe_df, by.x = c("Date", "Time"), by.y = c("Date", "Time"))
+
+head(merged_df)
+```
+
+```{r}
+spread <- log(merged_df$AMGNClose / as.numeric(merged_df$AMGNClose[1])) - log(merged_df$PFEClose / as.numeric(merged_df$PFEClose[1]))
+
+spread_data <- data.frame(Date = merged_df$Date, Time = merged_df$Time, Spread = spread)
+
+head(spread_data)
+```
+
+Plotting spread dynamic
+
+```{r}
+ggplot(spread_data, aes(x = Date, y = Spread)) +
+  geom_line(color = "blue") +
+  labs(title = "Spread", x = "Date", y = "Spread") +
+  theme_minimal()
+```
+
+```{r}
+Estimated_MLE<-function(data,N,M, sigma)
+{
+  Delta_1L<- numeric(N);
+  S_nM<- numeric(N);
+  S_nMean<- numeric(N)
+  S_nM[1]=sum(data[1:M]);
+  for(n in 2:N) {
+    i=(n-1)*M+1; up=n*M;
+    S_nM[n] <- sum(data[floor(i):floor(up)])
+  }
+  S_nMean<- S_nM-mean(S_nM);
+  phi_1<- (sum(S_nMean[1:N-1]*S_nMean[2:N]))/(sum(S_nMean^2));
+  data=data-mean(data)
+  R=length(data)
+  phi_Y= (sum(data[1:R-1]*data[2:R]))/(sum(data^2))
+  a_hat=-M*phi_Y+M;
+  out<- a_hat;
+}
+```
+
+```{r}
+Recovered_Increments<-function(data,N,a,M,sigma)
+{
+  Delta_1L<- numeric(N);
+  Delta_1L[1]<-(a/(M*sigma))*sum(data[1:M])+(1/sigma-a/(2*M*sigma))*(data[M]-data[1]);
+  for(n in 2:N) {
+    i=(n-1)*M+1; up=n*M;
+    Delta_1L[n] <-
+      (a/(M*sigma))*sum(data[floor(i):floor(up)])+(1/sigma-a/(2*M*sigma))*(data[up]-data[i-1])
+  }
+  out<-Delta_1L;
+}
+```
+
+Estimating a and recovering increments
+
+```{r}
+N <- nrow(spread_data)
+M <- 500
+sigma <- 1
+L <- spread_data$Spread
+a_h <- Estimated_MLE(L, N, M, sigma)
+recovered_increments <- Recovered_Increments(L, N, a=a_h, M, sigma)
+recovered_increments <- na.omit(recovered_increments)
+```
+
+Cleaning recovered increments
+
+```{r}
+recovered_increments <- data.frame(Index = 1:length(recovered_increments), Increment = recovered_increments)
+
+Delta_1L <- recovered_increments$Increment
+
+plot(Delta_1L,main="Recovered Increments")
+plot.ts(Delta_1L,main="Recovered Increments")
+```
+
+```{r}
+CARMA_MC<-function(R,N,alpha)
+{
+  quantile=qnorm(1-alpha/2);
+  counter_1=0;
+  a_hatMLE=c();
+  for(i in 1:R)
+  {
+    a_1L=acf(Delta_1L, plot = FALSE);
+    if(abs(sqrt(N)*a_1L$acf[2])>quantile){counter_1=counter_1+1};
+    a_hatMLE[i]=a_h;
+  }
+  freq_1=counter_1/R;
+  print(c(freq_1));
+  #print(a_hatMLE)
+  #print(a_1L)
+}
+```
+
+Testing
+
+```{r}
+N <- nrow(recovered_increments)
+alpha <- 0.05
+CARMA_MC(R=1,N,alpha )
+```
+
+ACF plot
+
+```{r}
+acf(Delta_1L,main="Recovered")
+```
+
+```{r}
+calculate_test_statistic <- function(Delta_1L, N) {
+  a_1L <- acf(Delta_1L, plot = FALSE) 
+  test_stat <- sqrt(N) * a_1L$acf[2]
+  return(test_stat)
+}
+calculate_test_statistic(Delta_1L, N)
+```
+
+```{r}
+KS_test<-function(R=10,N=100,K=5000,M=100,mu=0,a=0.9,eta=1,sigma=1,alpha=0.05)
+        {
+        counter_2=0;
+        for(i in 1:R)
+                {
+                Delta_1L_sample<- sample(Delta_1L, replace=T);
+                mu_hat=mean(Delta_1L);
+                eta_hat_sqrt=mean((Delta_1L-mu_hat)^2);
+                a_1L=ks.test(Delta_1L,"pnorm", mu_hat, sqrt(eta_hat_sqrt));
+                a_1L=a_1L$p.value;
+                if(a_1L<0.05){counter_2=counter_2+1};
+                }
+        freq_2=counter_2/R;
+        print(freq_2);
+        print(a_1L)
+}
+```
+
+```{r}
+KS_test(R=1)
+```
